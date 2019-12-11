@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
@@ -33,25 +34,29 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	veleroplugin "github.com/vmware-tanzu/velero/pkg/plugin/framework"
 )
 
 const (
-	zoneSeparator       = "__"
-	projectKey          = "project"
-	snapshotLocationKey = "snapshotLocation"
-	pdCSIDriver         = "pd.csi.storage.gke.io"
+	zoneSeparator                  = "__"
+	projectKey                     = "project"
+	snapshotLocationKey            = "snapshotLocation"
+	pdCSIDriver                    = "pd.csi.storage.gke.io"
+	snapshotCreationTimeoutKey     = "snapshotCreationTimeout"
+	snapshotCreationTimeoutDefault = 60 * time.Minute
 )
 
 var pdVolRegexp = regexp.MustCompile(`^projects\/[^\/]+\/(zones|regions)\/[^\/]+\/disks\/[^\/]+$`)
 
 type VolumeSnapshotter struct {
-	log              logrus.FieldLogger
-	gce              *compute.Service
-	snapshotLocation string
-	volumeProject    string
-	snapshotProject  string
+	log                     logrus.FieldLogger
+	gce                     *compute.Service
+	snapshotLocation        string
+	volumeProject           string
+	snapshotProject         string
+	snapshotCreationTimeout time.Duration
 }
 
 func newVolumeSnapshotter(logger logrus.FieldLogger) *VolumeSnapshotter {
@@ -59,7 +64,12 @@ func newVolumeSnapshotter(logger logrus.FieldLogger) *VolumeSnapshotter {
 }
 
 func (b *VolumeSnapshotter) Init(config map[string]string) error {
-	if err := veleroplugin.ValidateVolumeSnapshotterConfigKeys(config, snapshotLocationKey, projectKey); err != nil {
+	if err := veleroplugin.ValidateVolumeSnapshotterConfigKeys(
+		config,
+		snapshotLocationKey,
+		projectKey,
+		snapshotCreationTimeoutKey,
+	); err != nil {
 		return err
 	}
 
@@ -77,6 +87,15 @@ func (b *VolumeSnapshotter) Init(config map[string]string) error {
 	b.snapshotProject = config[projectKey]
 	if b.snapshotProject == "" {
 		b.snapshotProject = b.volumeProject
+	}
+	// if config["snapshotCreationTimeout"] is empty, default to 60m; otherwise, parse it
+	if val := config[snapshotCreationTimeoutKey]; val == "" {
+		b.snapshotCreationTimeout = snapshotCreationTimeoutDefault
+	} else {
+		b.snapshotCreationTimeout, err = time.ParseDuration(val)
+		if err != nil {
+			return errors.Wrapf(err, "unable to parse value %q for config key %q (expected a duration string)", val, snapshotCreationTimeoutKey)
+		}
 	}
 	client := oauth2.NewClient(oauth2.NoContext, creds.TokenSource)
 
@@ -138,7 +157,7 @@ func (b *VolumeSnapshotter) getZoneURLs(volumeAZ string) ([]string, error) {
 
 func (b *VolumeSnapshotter) CreateVolumeFromSnapshot(snapshotID, volumeType, volumeAZ string, iops *int64) (volumeID string, err error) {
 	// get the snapshot so we can apply its tags to the volume
-	res, err := b.gce.Snapshots.Get(b.snapshotProject, snapshotID).Do()
+	res, err := b.snapshotWhenAvailable(snapshotID)
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
@@ -179,6 +198,46 @@ func (b *VolumeSnapshotter) CreateVolumeFromSnapshot(snapshotID, volumeType, vol
 	}
 
 	return disk.Name, nil
+}
+
+func (b *VolumeSnapshotter) snapshotWhenAvailable(snapshotID string) (*compute.Snapshot, error) {
+	logger := b.log.WithField("snapshotID", snapshotID)
+
+	var snapshot *compute.Snapshot
+	err := wait.PollImmediate(time.Second, b.snapshotCreationTimeout, func() (bool, error) {
+		var err error
+		snapshot, err = b.gce.Snapshots.Get(b.snapshotProject, snapshotID).Do()
+		if err != nil {
+			return true, err
+		}
+		if snapshot.Status == "CREATING" || snapshot.Status == "UPLOADING" {
+			snapshot = nil
+			logger.Debug("snapshot not yet ready for use")
+			return false, nil
+		}
+		if snapshot.Status == "READY" {
+			return true, nil
+		}
+		if snapshot.Status == "FAILED" {
+			snapshot = nil
+			logger.Debug("snapshot has 'FAILED' status")
+			return true, errors.Errorf("Snapshot has 'FAILED' status")
+		}
+		if snapshot.Status == "DELETING" {
+			snapshot = nil
+			logger.Debug("snapshot has 'DELETING' status")
+			return true, errors.Errorf("Snapshot has 'DELETING' status")
+		}
+		unknownStatus := snapshot.Status
+		snapshot = nil
+		return true, errors.Errorf("Snapshot has unknown status '%s'", unknownStatus)
+	})
+
+	if err == wait.ErrWaitTimeout {
+		logger.Debug("timeout reached waiting for snapshot to be ready")
+	}
+
+	return snapshot, err
 }
 
 func (b *VolumeSnapshotter) GetVolumeInfo(volumeID, volumeAZ string) (string, *int64, error) {
