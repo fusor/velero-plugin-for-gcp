@@ -700,7 +700,7 @@
   version = "kubernetes-1.15.3"
 
 [[projects]]
-  digest = "1:5edd7138a285ce2baa994b139457d69b671452d3731d913234abdb116914d25d"
+  digest = "1:1a72dd17252d32391249a23cf08968096f92714ba455fe6dd2b8f49837127acd"
   name = "k8s.io/apimachinery"
   packages = [
     "pkg/api/equality",
@@ -737,6 +737,7 @@
     "pkg/util/strategicpatch",
     "pkg/util/validation",
     "pkg/util/validation/field",
+    "pkg/util/wait",
     "pkg/util/yaml",
     "pkg/version",
     "pkg/watch",
@@ -915,6 +916,7 @@
     "k8s.io/api/core/v1",
     "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured",
     "k8s.io/apimachinery/pkg/runtime",
+    "k8s.io/apimachinery/pkg/util/wait",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1
