@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
+	uuid "github.com/gofrs/uuid"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -167,8 +167,12 @@ func (b *VolumeSnapshotter) CreateVolumeFromSnapshot(snapshotID, volumeType, vol
 	//
 	// use the snapshot's description (which contains tags from the snapshotted disk
 	// plus Velero-specific tags) to set the new disk's description.
+	uid, err := uuid.NewV4()
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
 	disk := &compute.Disk{
-		Name:           "restore-" + uuid.NewV4().String(),
+		Name:           "restore-" + uid.String(),
 		SourceSnapshot: res.SelfLink,
 		Type:           volumeType,
 		Description:    res.Description,
@@ -268,7 +272,11 @@ func (b *VolumeSnapshotter) CreateSnapshot(volumeID, volumeAZ string, tags map[s
 	// snapshot names must adhere to RFC1035 and be 1-63 characters
 	// long
 	var snapshotName string
-	suffix := "-" + uuid.NewV4().String()
+	uid, err := uuid.NewV4()
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	suffix := "-" + uid.String()
 
 	if len(volumeID) <= (63 - len(suffix)) {
 		snapshotName = volumeID + suffix
